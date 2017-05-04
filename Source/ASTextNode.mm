@@ -53,7 +53,7 @@ static const CGFloat ASTextNodeHighlightDarkOpacity = 0.22;
 static NSString *ASTextNodeTruncationTokenAttributeName = @"ASTextNodeTruncationAttribute";
 
 struct ASTextNodeDrawParameter {
-  CGRect bounds;
+  UIEdgeInsets textContainerInsets;
   UIColor *backgroundColor;
 };
 
@@ -289,8 +289,7 @@ static NSArray *DefaultLinkAttributeNames = @[ NSLinkAttributeName ];
 - (ASTextKitRenderer *)_rendererWithBoundsSlow:(CGRect)bounds
 {
   ASDN::MutexLocker l(__instanceLock__);
-  bounds.size.width -= (_textContainerInset.left + _textContainerInset.right);
-  bounds.size.height -= (_textContainerInset.top + _textContainerInset.bottom);
+  bounds = UIEdgeInsetsInsetRect(bounds, _textContainerInset);
   return rendererForAttributes([self _rendererAttributes], bounds.size);
 }
 
@@ -458,34 +457,33 @@ static NSArray *DefaultLinkAttributeNames = @[ NSLinkAttributeName ];
 
 #pragma mark - Drawing
 
-static NSString *ASTextNodeBackgroundColorDrawParameterKey = @"backgroundColor";
-static NSString *ASTextNodeContainerInsetsDrawParameterKey = @"containerInsets";
-static NSString *ASTextNodeRendererDrawParameterKey = @"renderer";
-
 - (NSObject *)drawParametersForAsyncLayer:(_ASDisplayLayer *)layer
 {
   ASDN::MutexLocker l(__instanceLock__);
  
-  NSMutableDictionary *drawParameters = [[NSMutableDictionary alloc] init];
-  if (self.backgroundColor != nil) {
-    drawParameters[ASTextNodeBackgroundColorDrawParameterKey] = self.backgroundColor;
-  }
-  if (!UIEdgeInsetsEqualToEdgeInsets(_textContainerInset, UIEdgeInsetsZero)) {
-    drawParameters[ASTextNodeContainerInsetsDrawParameterKey] = [NSValue valueWithUIEdgeInsets:_textContainerInset];
-  }
-  drawParameters[ASTextNodeRendererDrawParameterKey] = [self _rendererWithBoundsSlow:self.bounds];
-  return drawParameters;
+  // Hack around to use the class method
+  _drawParameter = {
+    .textContainerInsets = _textContainerInset,
+    .backgroundColor = self.backgroundColor
+  };
+
+  return self;
+}
+
+- (ASTextNodeDrawParameter)drawParameter
+{
+  ASDN::MutexLocker l(__instanceLock__);
+  return _drawParameter;
 }
 
 + (void)drawRect:(CGRect)bounds withParameters:(id)parameters isCancelled:(asdisplaynode_iscancelled_block_t)isCancelledBlock isRasterizing:(BOOL)isRasterizing
 {
-  UIColor *backgroundColor = isRasterizing ? nil : parameters[ASTextNodeBackgroundColorDrawParameterKey];
-  ASTextKitRenderer *renderer = parameters[ASTextNodeRendererDrawParameterKey];
-  UIEdgeInsets textContainerInset = UIEdgeInsetsZero;
-  NSValue *textContainerInsetValue = parameters[ASTextNodeContainerInsetsDrawParameterKey];
-  if (textContainerInsetValue) {
-    textContainerInset = [textContainerInsetValue UIEdgeInsetsValue];
-  }
+  ASTextNode *node = (ASTextNode *)parameters;
+  ASTextNodeDrawParameter drawParameter = node.drawParameter;
+  UIColor *backgroundColor = isRasterizing ? nil : drawParameter.backgroundColor;
+  UIEdgeInsets textContainerInset = drawParameter.textContainerInsets;
+  
+  ASTextKitRenderer *renderer = [node _rendererWithBoundsSlow:bounds];
   
   CGContextRef context = UIGraphicsGetCurrentContext();
   ASDisplayNodeAssert(context, @"This is no good without a context.");
