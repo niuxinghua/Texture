@@ -118,15 +118,39 @@ static ASTextKitRenderer *rendererForAttributes(ASTextKitAttributes attributes, 
   return renderer;
 }
 
-#pragma mark - ASTextNodeDisplayContext
+#pragma mark - ASTextNodeDrawParametert
 
-@interface ASTextNodeDrawParameter : NSObject
-@property (strong) UIColor *backgroundColor;
-@property (assign) UIEdgeInsets textContainerInsets;
-@property (assign) std::shared_ptr<ASTextKitAttributes> rendererAttributes;
+@interface ASTextNodeDrawParameter : NSObject {
+  std::unique_ptr<ASTextKitAttributes> _rendererAttributes;
+}
+@property (nonatomic, readonly, /*nullable*/) UIColor *backgroundColor;
+@property (nonatomic, readonly) UIEdgeInsets textContainerInsets;
+
+- (ASTextKitRenderer *)rendererForBounds:(CGRect)bounds;
+
 @end
 
 @implementation ASTextNodeDrawParameter
+
+- (instancetype)initWithRendererAttributes:(ASTextKitAttributes)rendererAttributes
+                           backgroundColor:(/*nullable*/ UIColor *)backgroundColor
+                       textContainerInsets:(UIEdgeInsets)textContainerInsets
+{
+  self = [super init];
+  if (self != nil) {
+    _rendererAttributes = ASDN::make_unique<ASTextKitAttributes>(rendererAttributes);
+    _backgroundColor = backgroundColor;
+    _textContainerInsets = textContainerInsets;
+  }
+  return self;
+}
+
+- (ASTextKitRenderer *)rendererForBounds:(CGRect)bounds
+{
+  CGRect rect = UIEdgeInsetsInsetRect(bounds, self.textContainerInsets);
+  return rendererForAttributes(*_rendererAttributes.get(), rect.size);
+}
+
 @end
 
 
@@ -289,8 +313,8 @@ static NSArray *DefaultLinkAttributeNames = @[ NSLinkAttributeName ];
 
 - (ASTextKitRenderer *)_renderer
 {
-  CGSize constrainedSize = self.threadSafeBounds.size;
-  return [self _rendererWithBounds:{.size = constrainedSize}];
+  ASDN::MutexLocker l(__instanceLock__);
+  return [self _locked_renderer];
 }
 
 - (ASTextKitRenderer *)_rendererWithBounds:(CGRect)bounds
@@ -299,16 +323,15 @@ static NSArray *DefaultLinkAttributeNames = @[ NSLinkAttributeName ];
   return [self _locked_rendererWithBounds:bounds];
 }
 
+- (ASTextKitRenderer *)_locked_renderer
+{
+  return [self _locked_rendererWithBounds:[self _locked_threadSafeBounds]];
+}
+
 - (ASTextKitRenderer *)_locked_rendererWithBounds:(CGRect)bounds
 {
   bounds = UIEdgeInsetsInsetRect(bounds, _textContainerInset);
-  return rendererForAttributes([self _rendererAttributes], bounds.size);
-}
-
-- (ASTextKitAttributes)_rendererAttributes
-{
-  ASDN::MutexLocker l(__instanceLock__);
-  return [self _locked_rendererAttributes];
+  return rendererForAttributes([self _locked_rendererAttributes], bounds.size);
 }
 
 - (ASTextKitAttributes)_locked_rendererAttributes
@@ -477,28 +500,23 @@ static NSArray *DefaultLinkAttributeNames = @[ NSLinkAttributeName ];
 {
   ASDN::MutexLocker l(__instanceLock__);
   
-  ASTextNodeDrawParameter *drawParameter = [[ASTextNodeDrawParameter alloc] init];
-  drawParameter.textContainerInsets = _textContainerInset;
-  drawParameter.backgroundColor = self.backgroundColor;
-  drawParameter.rendererAttributes = std::make_shared<ASTextKitAttributes>([self _locked_rendererAttributes]);
-  return drawParameter;
+  return [[ASTextNodeDrawParameter alloc] initWithRendererAttributes:[self _locked_rendererAttributes]
+                                                     backgroundColor:self.backgroundColor
+                                                 textContainerInsets:_textContainerInset];
 }
 
 + (void)drawRect:(CGRect)bounds withParameters:(id)parameters isCancelled:(asdisplaynode_iscancelled_block_t)isCancelledBlock isRasterizing:(BOOL)isRasterizing
 {
   ASTextNodeDrawParameter *drawParameter = (ASTextNodeDrawParameter *)parameters;
   UIColor *backgroundColor = isRasterizing ? nil : drawParameter.backgroundColor;
-  UIEdgeInsets textContainerInset = drawParameter.textContainerInsets;
-  ASTextKitAttributes rendererAttributes = *drawParameter.rendererAttributes.get();
-  
-  CGRect rect = UIEdgeInsetsInsetRect(bounds, textContainerInset);
-  ASTextKitRenderer *renderer = rendererForAttributes(rendererAttributes, rect.size);
+  UIEdgeInsets textContainerInsets = drawParameter.textContainerInsets;
+  ASTextKitRenderer *renderer = [drawParameter rendererForBounds:bounds];
   
   CGContextRef context = UIGraphicsGetCurrentContext();
   ASDisplayNodeAssert(context, @"This is no good without a context.");
  
   CGContextSaveGState(context);
-  CGContextTranslateCTM(context, textContainerInset.left, textContainerInset.top);
+  CGContextTranslateCTM(context, textContainerInsets.left, textContainerInsets.top);
   
   // Fill background
   if (backgroundColor != nil) {
@@ -534,7 +552,7 @@ static NSArray *DefaultLinkAttributeNames = @[ NSLinkAttributeName ];
   
   ASDN::MutexLocker l(__instanceLock__);
   
-  ASTextKitRenderer *renderer = [self _renderer];
+  ASTextKitRenderer *renderer = [self _locked_renderer];
   NSRange visibleRange = renderer.firstVisibleRange;
   NSAttributedString *attributedString = _attributedText;
   NSRange clampedRange = NSIntersectionRange(visibleRange, NSMakeRange(0, attributedString.length));
@@ -840,7 +858,7 @@ static CGRect ASTextNodeAdjustRenderRectForShadowPadding(CGRect rendererRect, UI
 {
   ASDN::MutexLocker l(__instanceLock__);
   
-  NSArray *rects = [[self _renderer] rectsForTextRange:textRange measureOption:measureOption];
+  NSArray *rects = [[self _locked_renderer] rectsForTextRange:textRange measureOption:measureOption];
   NSMutableArray *adjustedRects = [NSMutableArray array];
 
   for (NSValue *rectValue in rects) {
@@ -858,7 +876,7 @@ static CGRect ASTextNodeAdjustRenderRectForShadowPadding(CGRect rendererRect, UI
 {
   ASDN::MutexLocker l(__instanceLock__);
   
-  CGRect rect = [[self _renderer] trailingRect];
+  CGRect rect = [[self _locked_renderer] trailingRect];
   return ASTextNodeAdjustRenderRectForShadowPadding(rect, self.shadowPadding);
 }
 
@@ -866,7 +884,7 @@ static CGRect ASTextNodeAdjustRenderRectForShadowPadding(CGRect rendererRect, UI
 {
   ASDN::MutexLocker l(__instanceLock__);
   
-  CGRect frame = [[self _renderer] frameForTextRange:textRange];
+  CGRect frame = [[self _locked_renderer] frameForTextRange:textRange];
   return ASTextNodeAdjustRenderRectForShadowPadding(frame, self.shadowPadding);
 }
 
@@ -896,7 +914,7 @@ static CGRect ASTextNodeAdjustRenderRectForShadowPadding(CGRect rendererRect, UI
   UIGraphicsBeginImageContext(size);
   [self.placeholderColor setFill];
 
-  ASTextKitRenderer *renderer = [self _renderer];
+  ASTextKitRenderer *renderer = [self _locked_renderer];
   NSRange visibleRange = renderer.firstVisibleRange;
 
   // cap height is both faster and creates less subpixel blending
@@ -974,7 +992,7 @@ static CGRect ASTextNodeAdjustRenderRectForShadowPadding(CGRect rendererRect, UI
     NSRange visibleRange = NSMakeRange(0, 0);
     {
       ASDN::MutexLocker l(__instanceLock__);
-      visibleRange = [self _renderer].firstVisibleRange;
+      visibleRange = [self _locked_renderer].firstVisibleRange;
     }
     NSRange truncationMessageRange = [self _additionalTruncationMessageRangeWithVisibleRange:visibleRange];
     [self _setHighlightRange:truncationMessageRange forAttributeName:ASTextNodeTruncationTokenAttributeName value:nil animated:YES];
@@ -1157,14 +1175,8 @@ static CGRect ASTextNodeAdjustRenderRectForShadowPadding(CGRect rendererRect, UI
 
 - (UIEdgeInsets)shadowPadding
 {
-  return [self shadowPaddingWithRenderer:[self _renderer]];
-}
-
-- (UIEdgeInsets)shadowPaddingWithRenderer:(ASTextKitRenderer *)renderer
-{
   ASDN::MutexLocker l(__instanceLock__);
-  
-  return renderer.shadower.shadowPadding;
+  return [self _locked_renderer].shadower.shadowPadding;
 }
 
 #pragma mark - Truncation Message
@@ -1228,8 +1240,7 @@ static NSAttributedString *DefaultTruncationAttributedString()
 {
   ASDN::MutexLocker l(__instanceLock__);
   
-  ASTextKitRenderer *renderer = [self _renderer];
-  return renderer.isTruncated;
+  return [[self _locked_renderer] isTruncated];
 }
 
 - (void)setPointSizeScaleFactors:(NSArray *)pointSizeScaleFactors
@@ -1265,7 +1276,7 @@ static NSAttributedString *DefaultTruncationAttributedString()
 {
   ASDN::MutexLocker l(__instanceLock__);
   
-  return [[self _renderer] lineCount];
+  return [[self _locked_renderer] lineCount];
 }
 
 #pragma mark - Truncation Message
