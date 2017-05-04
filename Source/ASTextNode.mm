@@ -52,11 +52,6 @@ static const CGFloat ASTextNodeHighlightLightOpacity = 0.11;
 static const CGFloat ASTextNodeHighlightDarkOpacity = 0.22;
 static NSString *ASTextNodeTruncationTokenAttributeName = @"ASTextNodeTruncationAttribute";
 
-struct ASTextNodeDrawParameter {
-  UIEdgeInsets textContainerInsets;
-  UIColor *backgroundColor;
-};
-
 #pragma mark - ASTextKitRenderer
 
 @interface ASTextNodeRendererKey : NSObject
@@ -123,6 +118,20 @@ static ASTextKitRenderer *rendererForAttributes(ASTextKitAttributes attributes, 
   return renderer;
 }
 
+#pragma mark - ASTextNodeDisplayContext
+
+@interface ASTextNodeDrawParameter : NSObject
+@property (strong) UIColor *backgroundColor;
+@property (assign) UIEdgeInsets textContainerInsets;
+@property (assign) std::shared_ptr<ASTextKitAttributes> rendererAttributes;
+@end
+
+@implementation ASTextNodeDrawParameter
+@end
+
+
+#pragma mark - ASTextNode
+
 @interface ASTextNode () <UIGestureRecognizerDelegate>
 
 @end
@@ -146,8 +155,6 @@ static ASTextKitRenderer *rendererForAttributes(ASTextKitAttributes attributes, 
   ASTextNodeHighlightStyle _highlightStyle;
   NSRange _highlightRange;
   ASHighlightOverlayLayer *_activeHighlightLayer;
-
-  ASTextNodeDrawParameter _drawParameter;
 
   UILongPressGestureRecognizer *_longPressGestureRecognizer;
 }
@@ -283,12 +290,17 @@ static NSArray *DefaultLinkAttributeNames = @[ NSLinkAttributeName ];
 - (ASTextKitRenderer *)_renderer
 {
   CGSize constrainedSize = self.threadSafeBounds.size;
-  return [self _rendererWithBoundsSlow:{.size = constrainedSize}];
+  return [self _rendererWithBounds:{.size = constrainedSize}];
 }
 
-- (ASTextKitRenderer *)_rendererWithBoundsSlow:(CGRect)bounds
+- (ASTextKitRenderer *)_rendererWithBounds:(CGRect)bounds
 {
   ASDN::MutexLocker l(__instanceLock__);
+  return [self _locked_rendererWithBounds:bounds];
+}
+
+- (ASTextKitRenderer *)_locked_rendererWithBounds:(CGRect)bounds
+{
   bounds = UIEdgeInsetsInsetRect(bounds, _textContainerInset);
   return rendererForAttributes([self _rendererAttributes], bounds.size);
 }
@@ -296,7 +308,11 @@ static NSArray *DefaultLinkAttributeNames = @[ NSLinkAttributeName ];
 - (ASTextKitAttributes)_rendererAttributes
 {
   ASDN::MutexLocker l(__instanceLock__);
-  
+  return [self _locked_rendererAttributes];
+}
+
+- (ASTextKitAttributes)_locked_rendererAttributes
+{
   return {
     .attributedString = _attributedText,
     .truncationAttributedString = [self _locked_composedTruncationText],
@@ -346,7 +362,7 @@ static NSArray *DefaultLinkAttributeNames = @[ NSLinkAttributeName ];
 
   [self setNeedsDisplay];
   
-  ASTextKitRenderer *renderer = [self _rendererWithBoundsSlow:{.size = constrainedSize}];
+  ASTextKitRenderer *renderer = [self _locked_rendererWithBounds:{.size = constrainedSize}];
   CGSize size = renderer.size;
   if (_attributedText.length > 0) {
     self.style.ascender = [[self class] ascenderWithAttributedString:_attributedText];
@@ -460,30 +476,23 @@ static NSArray *DefaultLinkAttributeNames = @[ NSLinkAttributeName ];
 - (NSObject *)drawParametersForAsyncLayer:(_ASDisplayLayer *)layer
 {
   ASDN::MutexLocker l(__instanceLock__);
- 
-  // Hack around to use the class method
-  _drawParameter = {
-    .textContainerInsets = _textContainerInset,
-    .backgroundColor = self.backgroundColor
-  };
-
-  return self;
-}
-
-- (ASTextNodeDrawParameter)drawParameter
-{
-  ASDN::MutexLocker l(__instanceLock__);
-  return _drawParameter;
+  
+  ASTextNodeDrawParameter *drawParameter = [[ASTextNodeDrawParameter alloc] init];
+  drawParameter.textContainerInsets = _textContainerInset;
+  drawParameter.backgroundColor = self.backgroundColor;
+  drawParameter.rendererAttributes = std::make_shared<ASTextKitAttributes>([self _locked_rendererAttributes]);
+  return drawParameter;
 }
 
 + (void)drawRect:(CGRect)bounds withParameters:(id)parameters isCancelled:(asdisplaynode_iscancelled_block_t)isCancelledBlock isRasterizing:(BOOL)isRasterizing
 {
-  ASTextNode *node = (ASTextNode *)parameters;
-  ASTextNodeDrawParameter drawParameter = node.drawParameter;
+  ASTextNodeDrawParameter *drawParameter = (ASTextNodeDrawParameter *)parameters;
   UIColor *backgroundColor = isRasterizing ? nil : drawParameter.backgroundColor;
   UIEdgeInsets textContainerInset = drawParameter.textContainerInsets;
+  ASTextKitAttributes rendererAttributes = *drawParameter.rendererAttributes.get();
   
-  ASTextKitRenderer *renderer = [node _rendererWithBoundsSlow:bounds];
+  CGRect rect = UIEdgeInsetsInsetRect(bounds, textContainerInset);
+  ASTextKitRenderer *renderer = rendererForAttributes(rendererAttributes, rect.size);
   
   CGContextRef context = UIGraphicsGetCurrentContext();
   ASDisplayNodeAssert(context, @"This is no good without a context.");
