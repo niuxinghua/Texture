@@ -41,6 +41,8 @@
 
 #include <functional>
 
+
+
 struct ASImageNodeDrawParameters {
   BOOL opaque;
   CGRect bounds;
@@ -56,6 +58,15 @@ struct ASImageNodeDrawParameters {
   ASDisplayNodeContextModifier willDisplayNodeContentWithRenderingContext;
   ASDisplayNodeContextModifier didDisplayNodeContentWithRenderingContext;
 };
+
+@interface ASImageNodeDrawParametersWrapper : NSObject
+@property (strong, nonatomic) UIImage *image;
+@property (assign, nonatomic) std::shared_ptr<ASImageNodeDrawParameters> params;
+@property (weak, nonatomic) ASImageNode *node;
+@end
+
+@implementation ASImageNodeDrawParametersWrapper
+@end
 
 /**
  * Contains all data that is needed to generate the content bitmap.
@@ -284,13 +295,20 @@ struct ASImageNodeDrawParameters {
   self.placeholderEnabled = placeholderColor != nil;
 }
 
+- (void)setWeakCacheEntry:(ASWeakMapEntry *)weakCacheEntry
+{
+  ASDN::MutexLocker l(__instanceLock__);
+  
+  _weakCacheEntry = weakCacheEntry;
+}
+
 #pragma mark - Drawing
 
 - (NSObject *)drawParametersForAsyncLayer:(_ASDisplayLayer *)layer
 {
   ASDN::MutexLocker l(__instanceLock__);
   
-  _drawParameter = {
+  ASImageNodeDrawParameters params = {
     .bounds = self.bounds,
     .opaque = self.opaque,
     .contentsScale = self.contentsScaleForDisplay,
@@ -305,8 +323,12 @@ struct ASImageNodeDrawParameters {
     .willDisplayNodeContentWithRenderingContext = _willDisplayNodeContentWithRenderingContext,
     .didDisplayNodeContentWithRenderingContext = _didDisplayNodeContentWithRenderingContext
   };
-  
-  return nil;
+    
+  ASImageNodeDrawParametersWrapper *wrapper = [ASImageNodeDrawParametersWrapper new];
+  wrapper.image = _image;
+  wrapper.params = std::make_shared<ASImageNodeDrawParameters>(params);
+  wrapper.node = self;
+  return wrapper;
 }
 
 - (NSDictionary *)debugLabelAttributes
@@ -317,16 +339,16 @@ struct ASImageNodeDrawParameters {
   };
 }
 
-- (UIImage *)displayWithParameters:(id<NSObject> *)parameter isCancelled:(asdisplaynode_iscancelled_block_t)isCancelled
++ (UIImage *)displayWithParameters:(id<NSObject>)parameter isCancelled:(asdisplaynode_iscancelled_block_t)isCancelled
 {
-  UIImage *image = self.image;
+  ASImageNodeDrawParametersWrapper *wrapper = (ASImageNodeDrawParametersWrapper *)parameter;
+
+  UIImage *image = wrapper.image;
   if (image == nil) {
     return nil;
   }
   
-  __instanceLock__.lock();
-  ASImageNodeDrawParameters drawParameter = _drawParameter;
-  __instanceLock__.unlock();
+  ASImageNodeDrawParameters drawParameter = *wrapper.params.get();
   
   CGRect drawParameterBounds       = drawParameter.bounds;
   BOOL forceUpscaling              = drawParameter.forceUpscaling;
@@ -418,9 +440,9 @@ struct ASImageNodeDrawParameters {
     return nil;
   }
   
-  __instanceLock__.lock();
-    _weakCacheEntry = entry; // Retain so that the entry remains in the weak cache
-  __instanceLock__.unlock();
+  //__instanceLock__.lock();
+  wrapper.node.weakCacheEntry = entry; // Retain so that the entry remains in the weak cache
+  //__instanceLock__.unlock();
 
   return entry.value;
 }
